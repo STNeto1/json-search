@@ -195,7 +195,7 @@ impl Database {
             .into_iter()
             .map(|id| {
                 (
-                    *id,
+                    id.clone(),
                     tokens
                         .iter()
                         .map(|t| self.calculate_tf_idf(id, t))
@@ -208,10 +208,12 @@ impl Database {
 
         let mut entries = Vec::new();
         for (id, score) in result {
+            let parsed_id = id as u64;
+
             let entry = self
                 .entries
                 .iter()
-                .find(|e| e.get("id").unwrap().as_u64().unwrap() == id as u64)
+                .find(|e| e.get("id").unwrap().as_u64().unwrap() == parsed_id)
                 .unwrap()
                 .clone();
             entries.push((entry, score));

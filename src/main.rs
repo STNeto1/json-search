@@ -1,9 +1,25 @@
+use std::{
+    net::SocketAddr,
+    sync::{Arc, Mutex},
+};
+
 use anyhow::{Context, Result};
+use axum::{
+    extract::{Query, State},
+    routing, Json, Router,
+};
+use serde::{Deserialize, Serialize};
 
 mod search;
 mod tokenizer;
 
-fn main() -> Result<()> {
+#[derive(Debug)]
+struct AppState {
+    db: search::Database,
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
     let mut db = search::Database::new();
 
     // read file from assets
@@ -22,14 +38,56 @@ fn main() -> Result<()> {
     db.tokenize_entries()
         .context("Failed to tokenize entries")?;
 
-    let term = "Green Smoothie";
+    let app_state = Arc::new(Mutex::new(AppState { db }));
 
-    let now = std::time::Instant::now();
-    db.search(term)?
-        .iter()
-        .take(10)
-        .for_each(|entry| println!("\t{} => {}", entry.0, entry.1));
-    println!("Search took {}ms", now.elapsed().as_millis());
+    let app = Router::new()
+        .route("/search", routing::get(handle_search))
+        .with_state(app_state);
+
+    let addr = SocketAddr::from(([127, 0, 0, 1], 3000));
+    axum::Server::bind(&addr)
+        .serve(app.into_make_service())
+        .await
+        .unwrap();
 
     Ok(())
+}
+
+#[derive(Debug, Serialize)]
+struct SearchResponse {
+    hits: Vec<serde_json::Value>,
+    total_hits: u32,
+    query: String,
+    took: u128,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct SearchQuery {
+    query: Option<String>,
+}
+
+// This implementation is borderline bad practice, but it's just for the sake of the example
+async fn handle_search(
+    qs: Query<SearchQuery>,
+    State(app_state): State<Arc<Mutex<AppState>>>,
+) -> Json<SearchResponse> {
+    let now = std::time::Instant::now();
+
+    let query_term = qs.query.clone().unwrap_or_default();
+
+    let search_result = app_state
+        .lock()
+        .unwrap()
+        .db
+        .search(query_term.as_str())
+        .unwrap();
+
+    let response = SearchResponse {
+        hits: search_result.iter().take(10).map(|r| r.0.clone()).collect(),
+        total_hits: search_result.len() as u32,
+        query: query_term,
+        took: now.elapsed().as_millis(),
+    };
+
+    Json(response)
 }
