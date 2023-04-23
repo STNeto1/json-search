@@ -1,4 +1,4 @@
-use std::{collections::HashMap, time::Instant};
+use std::collections::HashMap;
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
@@ -64,15 +64,30 @@ impl From<Record> for Entry {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct Database {
     pub entries: Vec<Entry>,
     tokens: HashMap<u32, Vec<String>>,
 
     tf: HashMap<u32, HashMap<String, u32>>,
+    token_score: HashMap<String, f32>,
+
+    tokenizer: Tokenizer,
 }
 
 impl Database {
+    fn new() -> Self {
+        Self {
+            entries: Vec::new(),
+            tokens: HashMap::new(),
+            tf: HashMap::new(),
+            token_score: HashMap::new(),
+            tokenizer: Tokenizer::from_pretrained("bert-base-cased", None)
+                .map_err(|err| anyhow::anyhow!(err))
+                .unwrap(),
+        }
+    }
+
     fn add(&mut self, entry: Entry) {
         let id = self.entries.len() as u32 + 1;
 
@@ -80,11 +95,9 @@ impl Database {
     }
 
     fn tokenize_entries(&mut self) -> Result<()> {
-        let tokenizer = Tokenizer::from_pretrained("bert-base-cased", None)
-            .map_err(|err| anyhow::anyhow!(err))?;
-
         for entry in &self.entries {
-            let encoding = tokenizer
+            let encoding = self
+                .tokenizer
                 .encode(entry.get_tokens(), false)
                 .map_err(|err| anyhow::anyhow!(err))?;
 
@@ -122,11 +135,21 @@ impl Database {
         return (n / df).ln();
     }
 
-    fn search(&self, query: &str) -> Result<Vec<(Entry, f32)>> {
-        let tokenizer = Tokenizer::from_pretrained("bert-base-cased", None)
-            .map_err(|err| anyhow::anyhow!(err))?;
+    fn calculate_tf_idf(&mut self, key: &u32, token: &str) -> f32 {
+        if self.token_score.contains_key(token) {
+            return *self.token_score.get(token).unwrap();
+        }
 
-        let encoding = tokenizer
+        let tf = self.get_tf(key, token);
+        let idf = self.get_idf(token);
+        self.token_score.insert(token.to_string(), tf * idf);
+
+        return tf * idf;
+    }
+
+    fn search(&mut self, query: &str) -> Result<Vec<(Entry, f32)>> {
+        let encoding = self
+            .tokenizer
             .encode(query, false)
             .map_err(|err| anyhow::anyhow!(err))?;
 
@@ -136,10 +159,7 @@ impl Database {
         for (id, _kv) in self.tf.clone() {
             let mut total_sum = 0f32;
             for token in tokens {
-                let tf_rating = self.get_tf(&id, token);
-                let idf_rating = self.get_idf(token);
-
-                total_sum += tf_rating * idf_rating;
+                total_sum += self.calculate_tf_idf(&id, token);
             }
 
             result.push((id, total_sum));
@@ -158,7 +178,7 @@ impl Database {
 }
 
 fn main() -> Result<()> {
-    let mut db = Database::default();
+    let mut db = Database::new();
 
     // read file from assets
     csv::Reader::from_path("assets/data.csv")
@@ -170,19 +190,12 @@ fn main() -> Result<()> {
             db.add(entry);
         });
 
-    let now = Instant::now();
     db.tokenize_entries()
         .context("Failed to tokenize entries")?;
-    println!("tokenize entries took {}ms", now.elapsed().as_millis());
 
     let term = "Green Smoothie";
-    println!("search for {}", term);
 
-    let now = Instant::now();
-    let search_result = db.search(term)?;
-    println!("search took {}ms", now.elapsed().as_millis());
-
-    search_result
+    db.search(term)?
         .iter()
         .take(10)
         .for_each(|entry| println!("\t{} {} => {}", entry.0.id, entry.0.name, entry.1));
