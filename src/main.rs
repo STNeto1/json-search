@@ -70,8 +70,6 @@ struct Database {
     tokens: HashMap<u32, Vec<String>>,
 
     tf: HashMap<u32, HashMap<String, u32>>,
-    token_score: HashMap<String, f32>,
-
     tokenizer: Tokenizer,
 }
 
@@ -81,7 +79,6 @@ impl Database {
             entries: Vec::new(),
             tokens: HashMap::new(),
             tf: HashMap::new(),
-            token_score: HashMap::new(),
             tokenizer: Tokenizer::from_pretrained("bert-base-cased", None)
                 .map_err(|err| anyhow::anyhow!(err))
                 .unwrap(),
@@ -101,7 +98,11 @@ impl Database {
                 .encode(entry.get_tokens(), false)
                 .map_err(|err| anyhow::anyhow!(err))?;
 
-            let tokens = encoding.get_tokens();
+            let tokens = encoding
+                .get_tokens()
+                .iter()
+                .map(|x| x.to_ascii_uppercase())
+                .collect::<Vec<String>>();
 
             self.tokens.insert(entry.id, tokens.to_vec());
 
@@ -136,13 +137,8 @@ impl Database {
     }
 
     fn calculate_tf_idf(&mut self, key: &u32, token: &str) -> f32 {
-        if self.token_score.contains_key(token) {
-            return *self.token_score.get(token).unwrap();
-        }
-
         let tf = self.get_tf(key, token);
         let idf = self.get_idf(token);
-        self.token_score.insert(token.to_string(), tf * idf);
 
         return tf * idf;
     }
@@ -153,18 +149,25 @@ impl Database {
             .encode(query, false)
             .map_err(|err| anyhow::anyhow!(err))?;
 
-        let tokens = encoding.get_tokens();
+        let tokens: Vec<String> = encoding
+            .get_tokens()
+            .iter()
+            .map(|x| x.to_ascii_uppercase())
+            .collect();
 
-        let mut result = Vec::<(u32, f32)>::new();
-        for (id, _kv) in self.tf.clone() {
-            let mut total_sum = 0f32;
-            for token in tokens {
-                total_sum += self.calculate_tf_idf(&id, token);
-            }
-
-            result.push((id, total_sum));
-        }
-
+        let mut result = self
+            .tf
+            .clone()
+            .keys()
+            .into_iter()
+            .map(|id| {
+                (
+                    *id,
+                    tokens.iter().map(|t| self.calculate_tf_idf(id, t)).sum(),
+                )
+            })
+            .filter(|(_, score)| *score > 0.0)
+            .collect::<Vec<(u32, f32)>>();
         result.sort_by(|(_, a), (_, b)| b.partial_cmp(a).unwrap());
 
         let mut entries = Vec::new();
@@ -195,10 +198,12 @@ fn main() -> Result<()> {
 
     let term = "Green Smoothie";
 
+    let now = std::time::Instant::now();
     db.search(term)?
         .iter()
         .take(10)
-        .for_each(|entry| println!("\t{} {} => {}", entry.0.id, entry.0.name, entry.1));
+        .for_each(|entry| println!("\t{} => {}", entry.0.name, entry.1));
+    println!("Search took {}ms", now.elapsed().as_millis());
 
     Ok(())
 }
