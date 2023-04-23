@@ -51,12 +51,20 @@ impl From<Record> for Entry {
 }
 
 #[derive(Debug)]
+struct CachedResult {
+    result: Vec<(serde_json::Value, f32)>,
+    expiration: std::time::Instant,
+}
+
+#[derive(Debug)]
 struct Database {
     pub entries: Vec<serde_json::Value>,
     tokens: HashMap<u32, Vec<String>>,
 
     tf: HashMap<u32, HashMap<String, u32>>,
     tokenizer: Tokenizer,
+
+    cached_results: HashMap<String, CachedResult>,
 }
 
 impl Database {
@@ -68,6 +76,7 @@ impl Database {
             tokenizer: Tokenizer::from_pretrained("bert-base-cased", None)
                 .map_err(|err| anyhow::anyhow!(err))
                 .unwrap(),
+            cached_results: HashMap::new(),
         }
     }
 
@@ -165,6 +174,12 @@ impl Database {
     }
 
     fn search(&mut self, query: &str) -> Result<Vec<(serde_json::Value, f32)>> {
+        if let Some(cached_result) = self.cached_results.get(query) {
+            if cached_result.expiration > std::time::Instant::now() {
+                return Ok(cached_result.result.clone());
+            }
+        }
+
         let encoding = self
             .tokenizer
             .encode(query, false)
@@ -201,6 +216,14 @@ impl Database {
                 .clone();
             entries.push((entry, score));
         }
+
+        self.cached_results.insert(
+            query.to_string(),
+            CachedResult {
+                result: entries.clone(),
+                expiration: std::time::Instant::now() + std::time::Duration::from_secs(60),
+            },
+        );
 
         Ok(entries)
     }
