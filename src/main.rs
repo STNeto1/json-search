@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use anyhow::{Context, Result};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tokenizers::Tokenizer;
 
 #[derive(Debug, Deserialize)]
@@ -25,7 +25,7 @@ struct Record {
     year: u32,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct Entry {
     id: u32,
     name: String,
@@ -34,20 +34,6 @@ struct Entry {
     reviews: u32,
     price: f64,
     year: u32,
-}
-
-impl Entry {
-    fn get_tokens(&self) -> Vec<String> {
-        vec![
-            self.id.to_string(),
-            self.name.clone(),
-            self.author.clone(),
-            self.user_rating.to_string(),
-            self.reviews.to_string(),
-            self.price.to_string(),
-            self.year.to_string(),
-        ]
-    }
 }
 
 impl From<Record> for Entry {
@@ -66,7 +52,7 @@ impl From<Record> for Entry {
 
 #[derive(Debug)]
 struct Database {
-    pub entries: Vec<Entry>,
+    pub entries: Vec<serde_json::Value>,
     tokens: HashMap<u32, Vec<String>>,
 
     tf: HashMap<u32, HashMap<String, u32>>,
@@ -85,17 +71,47 @@ impl Database {
         }
     }
 
-    fn add(&mut self, entry: Entry) {
-        let id = self.entries.len() as u32 + 1;
+    fn add(&mut self, entry: serde_json::Value) {
+        self.entries.push(entry);
+    }
 
-        self.entries.push(Entry { id, ..entry });
+    fn get_tokens(&self, val: &serde_json::Value) -> Option<Vec<String>> {
+        // self.tokens.get(key).unwrap().clone()
+        return match val {
+            serde_json::Value::Object(map) => {
+                let mut tokens = Vec::new();
+                for (_, value) in map {
+                    match &mut self.get_tokens(value) {
+                        Some(v) => tokens.append(v),
+                        None => {}
+                    }
+                }
+                Some(tokens)
+            }
+            serde_json::Value::Array(arr) => {
+                let mut tokens = Vec::new();
+                for value in arr {
+                    match &mut self.get_tokens(value) {
+                        Some(v) => tokens.append(v),
+                        None => {}
+                    }
+                }
+                Some(tokens)
+            }
+            serde_json::Value::String(s) => Some(vec![s.to_string()]),
+            serde_json::Value::Number(n) => Some(vec![n.to_string()]),
+            serde_json::Value::Bool(b) => Some(vec![b.to_string()]),
+            serde_json::Value::Null => None,
+        };
     }
 
     fn tokenize_entries(&mut self) -> Result<()> {
         for entry in &self.entries {
+            let entry_tokens = self.get_tokens(entry).context("Failed to get tokens")?;
+
             let encoding = self
                 .tokenizer
-                .encode(entry.get_tokens(), false)
+                .encode(entry_tokens, false)
                 .map_err(|err| anyhow::anyhow!(err))?;
 
             let tokens = encoding
@@ -104,14 +120,19 @@ impl Database {
                 .map(|x| x.to_ascii_uppercase())
                 .collect::<Vec<String>>();
 
-            self.tokens.insert(entry.id, tokens.to_vec());
+            let entry_id_key = entry.get("id").context("Failed to get id")?;
+            let id = entry_id_key
+                .as_u64()
+                .context("Failed to convert id to u64")?;
+
+            self.tokens.insert(id as u32, tokens.to_vec());
 
             let mut tf = HashMap::new();
             for token in tokens {
                 let count = tf.entry(token.to_string()).or_insert(0);
                 *count += 1;
             }
-            self.tf.insert(entry.id, tf);
+            self.tf.insert(id as u32, tf);
         }
 
         Ok(())
@@ -143,7 +164,7 @@ impl Database {
         return tf * idf;
     }
 
-    fn search(&mut self, query: &str) -> Result<Vec<(Entry, f32)>> {
+    fn search(&mut self, query: &str) -> Result<Vec<(serde_json::Value, f32)>> {
         let encoding = self
             .tokenizer
             .encode(query, false)
@@ -172,8 +193,13 @@ impl Database {
 
         let mut entries = Vec::new();
         for (id, score) in result {
-            let entry = self.entries.iter().find(|e| e.id == id).unwrap();
-            entries.push((entry.clone(), score));
+            let entry = self
+                .entries
+                .iter()
+                .find(|e| e.get("id").unwrap().as_u64().unwrap() == id as u64)
+                .unwrap()
+                .clone();
+            entries.push((entry, score));
         }
 
         Ok(entries)
@@ -189,8 +215,11 @@ fn main() -> Result<()> {
         .deserialize()
         .for_each(|record| {
             let mapped_record: Record = record.unwrap();
-            let entry = Entry::from(mapped_record);
-            db.add(entry);
+            let mut entry = Entry::from(mapped_record);
+            entry.id = db.entries.len() as u32 + 1;
+            let json_val = serde_json::to_value(entry).unwrap();
+
+            db.add(json_val);
         });
 
     db.tokenize_entries()
@@ -202,7 +231,7 @@ fn main() -> Result<()> {
     db.search(term)?
         .iter()
         .take(10)
-        .for_each(|entry| println!("\t{} => {}", entry.0.name, entry.1));
+        .for_each(|entry| println!("\t{} => {}", entry.0, entry.1));
     println!("Search took {}ms", now.elapsed().as_millis());
 
     Ok(())
